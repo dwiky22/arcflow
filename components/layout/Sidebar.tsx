@@ -123,12 +123,12 @@ export default function Sidebar({ activePage, onNavigate }: SidebarProps) {
               }}>
                 {item.label}
                 <div style={{
-                  position: 'absolute', left: -4, top: '50%', transform: 'translateY(-50%)',
-                  width: 8, height: 8, background: '#0c0f1a',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  borderRight: 'none', borderTop: 'none',
-                  transform: 'translateY(-50%) rotate(45deg)'
-                }} />
+  position: 'absolute', left: -4, top: '50%',
+  width: 8, height: 8, background: '#0c0f1a',
+  border: '1px solid rgba(255,255,255,0.08)',
+  borderRight: 'none', borderTop: 'none',
+  transform: 'translateY(-50%) rotate(45deg)'
+}} />
               </div>
             )}
           </div>
