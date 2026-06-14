@@ -136,7 +136,8 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
     if (!walletClient || !address) {
       updateMsg(msgId, { actionStatus: 'error', content: '❌ Connect wallet first' }); return
     }
-    if (!action.recipient || !isAddress(action.recipient)) {
+    const recipient = action.recipient
+    if (!recipient || !isAddress(recipient)) {
       updateMsg(msgId, { actionStatus: 'error' })
       setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: '❌ Invalid recipient address' }])
       return
@@ -149,15 +150,15 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
     try {
       const hash = await walletClient.writeContract({
         address: tokenAddress, abi: ERC20_ABI, functionName: 'transfer',
-        args: [action.recipient as `0x${string}`, amount],
+        args: [recipient as `0x${string}`, amount],
       })
       await new Promise(r => setTimeout(r, 6000))
 
       updateMsg(msgId, { actionStatus: 'done' })
-      onAction?.({ type: 'send', amount: action.amount, token, recipient: action.recipient, hash })
+      onAction?.({ type: 'send', amount: action.amount, token, recipient, hash })
       setMessages(prev => [...prev, {
         id: Date.now().toString(), role: 'assistant',
-        content: `✅ Sent ${action.amount} ${token} to ${action.recipient.slice(0,6)}...${action.recipient.slice(-4)}. [View on ArcScan](https://testnet.arcscan.app/tx/${hash})`
+        content: `✅ Sent ${action.amount} ${token} to ${recipient.slice(0,6)}...${recipient.slice(-4)}. [View on ArcScan](https://testnet.arcscan.app/tx/${hash})`
       }])
     } catch (e: any) {
       updateMsg(msgId, { actionStatus: 'error' })
@@ -176,7 +177,7 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
     }
     if (action.type === 'swap') executeSwap(msgId, action)
     else if (action.type === 'send') executeSend(msgId, action)
-    else if (action.type === 'bridge') onAction?.(action) // bridge: switch tab, too complex for inline
+    else if (action.type === 'bridge') onAction?.(action)
   }
 
   return (
@@ -251,7 +252,7 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
                       <>
                         <Row label="Amount" value={`${msg.action.amount} ${(msg.action.token || 'USDC').toUpperCase()}`} />
                         <Row label="Route" value={`${msg.action.fromChain || '?'} → ${msg.action.toChain || 'ARC'}`} color="#0EA5E9" />
-                        <Row label="Note" value="Switching to Bridge tab..." color="#64748B" />
+                        <Row label="Note" value="Open Bridge tab to continue" color="#64748B" />
                       </>
                     )}
                   </div>
