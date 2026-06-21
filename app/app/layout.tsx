@@ -1,3 +1,10 @@
+import IncomingNotifier from '@/components/ui/IncomingNotifier'
+
 export default function AppLayout({ children }: { children: React.ReactNode }) {
-  return <>{children}</>
+  return (
+    <>
+      <IncomingNotifier />
+      {children}
+    </>
+  )
 }

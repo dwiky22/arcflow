@@ -5,6 +5,7 @@ import { useAccount, useWalletClient, usePublicClient } from 'wagmi'
 import { parseUnits, formatUnits, maxUint256, isAddress } from 'viem'
 import { CONTRACTS } from '@/lib/wagmi'
 import { ERC20_ABI, SIMPLE_AMM_ABI } from '@/lib/contracts'
+import { useToast } from '@/components/ui/Toast'
 
 interface Action {
   type: 'bridge' | 'swap' | 'send'
@@ -28,18 +29,21 @@ interface Message {
 const SUGGESTIONS = [
   'Swap 5 USDC to EURC',
   'Send 2 USDC to 0x3cB55222160655ceb2bF5De0A898f6BA4e1A2ba9',
-  'Bridge 10 USDC from Sepolia to ARC',
-  'What can you help me with?',
+  'Bridge 10 USDC from Base Sepolia to ARC',
+  'What is Arc Network?',
+  'When is Arc mainnet?',
+  'What tokens are supported?',
 ]
 
 export default function AIPanel({ onAction }: { onAction?: (action: any) => void }) {
   const { address, isConnected } = useAccount()
   const { data: walletClient } = useWalletClient()
   const publicClient = usePublicClient()
+  const toast = useToast()
 
   const [messages, setMessages] = useState<Message[]>([{
     id: '0', role: 'assistant',
-    content: '👋 Hi! I\'m your ArcFlow AI Agent. Tell me what you want — swap, send, or bridge — and I\'ll prepare it for you to confirm.',
+    content: '👋 Hi! I\'m ArcFlow AI Agent powered by Groq. I can help you swap USDC↔EURC, send tokens, bridge cross-chain, or answer questions about Arc Network & Circle. What would you like to do?',
   }])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -56,11 +60,9 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
   const handleSend = async (text?: string) => {
     const userInput = text || input
     if (!userInput.trim() || loading) return
-
     setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: userInput }])
     setInput('')
     setLoading(true)
-
     try {
       const res = await fetch('/api/ai', {
         method: 'POST',
@@ -84,10 +86,9 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
     } finally { setLoading(false) }
   }
 
-  // ===== Execute Swap =====
   const executeSwap = async (msgId: string, action: Action) => {
     if (!walletClient || !publicClient || !address) {
-      updateMsg(msgId, { actionStatus: 'error', content: '❌ Connect wallet first' }); return
+      updateMsg(msgId, { actionStatus: 'error' }); return
     }
     const fromToken = (action.fromToken || 'USDC').toUpperCase()
     const direction: 'AtoB' | 'BtoA' = fromToken === 'USDC' ? 'AtoB' : 'BtoA'
@@ -97,45 +98,50 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
     updateMsg(msgId, { actionStatus: 'running' })
     try {
       const allowance = await publicClient.readContract({
-        address: tokenAddress, abi: ERC20_ABI, functionName: 'allowance',
-        args: [address, CONTRACTS.SIMPLE_AMM],
+        address: tokenAddress, abi: ERC20_ABI,
+        functionName: 'allowance', args: [address, CONTRACTS.SIMPLE_AMM],
       }) as bigint
 
       if (allowance < amountIn) {
+        toast.show({ type: 'info', title: 'Approving token...', desc: 'Confirm in wallet' })
         await walletClient.writeContract({
-          address: tokenAddress, abi: ERC20_ABI, functionName: 'approve',
-          args: [CONTRACTS.SIMPLE_AMM, maxUint256],
+          address: tokenAddress, abi: ERC20_ABI,
+          functionName: 'approve', args: [CONTRACTS.SIMPLE_AMM, maxUint256],
         })
         await new Promise(r => setTimeout(r, 10000))
       }
 
+      toast.show({ type: 'info', title: 'Executing swap...', desc: 'Confirm in wallet' })
       const swapFn = direction === 'AtoB' ? 'swapAForB' : 'swapBForA'
       const hash = await walletClient.writeContract({
-        address: CONTRACTS.SIMPLE_AMM, abi: SIMPLE_AMM_ABI, functionName: swapFn,
-        args: [amountIn],
+        address: CONTRACTS.SIMPLE_AMM, abi: SIMPLE_AMM_ABI,
+        functionName: swapFn, args: [amountIn],
       })
       await new Promise(r => setTimeout(r, 8000))
 
       updateMsg(msgId, { actionStatus: 'done' })
-      onAction?.({ type: 'swap', amount: action.amount, fromToken, toToken: direction === 'AtoB' ? 'EURC' : 'USDC', hash })
+      onAction?.({ type: 'swap', amount: action.amount, fromToken, hash })
+      toast.show({
+        type: 'success', title: 'Swap successful!',
+        desc: `${action.amount} ${fromToken} → ${direction === 'AtoB' ? 'EURC' : 'USDC'}`,
+        link: `https://testnet.arcscan.app/tx/${hash}`
+      })
       setMessages(prev => [...prev, {
         id: Date.now().toString(), role: 'assistant',
         content: `✅ Swap done! ${action.amount} ${fromToken} → ${direction === 'AtoB' ? 'EURC' : 'USDC'}. [View on ArcScan](https://testnet.arcscan.app/tx/${hash})`
       }])
     } catch (e: any) {
       updateMsg(msgId, { actionStatus: 'error' })
+      toast.show({ type: 'error', title: 'Swap failed', desc: e.shortMessage?.slice(0, 60) })
       setMessages(prev => [...prev, {
         id: Date.now().toString(), role: 'assistant',
-        content: `❌ Swap failed: ${e.shortMessage || e.message?.slice(0, 100)}`
+        content: `❌ Swap failed: ${e.shortMessage || e.message?.slice(0, 80)}`
       }])
     }
   }
 
-  // ===== Execute Send =====
   const executeSend = async (msgId: string, action: Action) => {
-    if (!walletClient || !address) {
-      updateMsg(msgId, { actionStatus: 'error', content: '❌ Connect wallet first' }); return
-    }
+    if (!walletClient || !address) { updateMsg(msgId, { actionStatus: 'error' }); return }
     const recipient = action.recipient
     if (!recipient || !isAddress(recipient)) {
       updateMsg(msgId, { actionStatus: 'error' })
@@ -148,23 +154,30 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
 
     updateMsg(msgId, { actionStatus: 'running' })
     try {
+      toast.show({ type: 'info', title: 'Sending...', desc: 'Confirm in wallet' })
       const hash = await walletClient.writeContract({
-        address: tokenAddress, abi: ERC20_ABI, functionName: 'transfer',
-        args: [recipient as `0x${string}`, amount],
+        address: tokenAddress, abi: ERC20_ABI,
+        functionName: 'transfer', args: [recipient as `0x${string}`, amount],
       })
       await new Promise(r => setTimeout(r, 6000))
 
       updateMsg(msgId, { actionStatus: 'done' })
       onAction?.({ type: 'send', amount: action.amount, token, recipient, hash })
+      toast.show({
+        type: 'success', title: 'Transfer successful!',
+        desc: `${action.amount} ${token} → ${recipient.slice(0,6)}...${recipient.slice(-4)}`,
+        link: `https://testnet.arcscan.app/tx/${hash}`
+      })
       setMessages(prev => [...prev, {
         id: Date.now().toString(), role: 'assistant',
         content: `✅ Sent ${action.amount} ${token} to ${recipient.slice(0,6)}...${recipient.slice(-4)}. [View on ArcScan](https://testnet.arcscan.app/tx/${hash})`
       }])
     } catch (e: any) {
       updateMsg(msgId, { actionStatus: 'error' })
+      toast.show({ type: 'error', title: 'Send failed', desc: e.shortMessage?.slice(0, 60) })
       setMessages(prev => [...prev, {
         id: Date.now().toString(), role: 'assistant',
-        content: `❌ Send failed: ${e.shortMessage || e.message?.slice(0, 100)}`
+        content: `❌ Send failed: ${e.shortMessage || e.message?.slice(0, 80)}`
       }])
     }
   }
@@ -177,11 +190,14 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
     }
     if (action.type === 'swap') executeSwap(msgId, action)
     else if (action.type === 'send') executeSend(msgId, action)
-    else if (action.type === 'bridge') onAction?.(action)
+    else if (action.type === 'bridge') {
+      updateMsg(msgId, { actionStatus: 'done' })
+      onAction?.(action)
+    }
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, height: '100%' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
       {/* Header */}
       <div style={{
@@ -191,13 +207,13 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{
-            width: 32, height: 32, borderRadius: 8, background: 'rgba(99,102,241,0.15)',
-            border: '1px solid rgba(99,102,241,0.3)', display: 'flex',
-            alignItems: 'center', justifyContent: 'center', fontSize: 16
+            width: 32, height: 32, borderRadius: 8,
+            background: 'rgba(99,102,241,0.15)', border: '1px solid rgba(99,102,241,0.3)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16
           }}>⚡</div>
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, color: '#F1F5F9' }}>ArcFlow AI Agent</div>
-            <div style={{ fontSize: 10, color: '#64748B', fontFamily: 'monospace' }}>Groq · llama-3.3-70b-versatile</div>
+            <div style={{ fontSize: 10, color: '#64748B', fontFamily: 'monospace' }}>Groq · llama-3.3-70b-versatile · Arc-aware</div>
           </div>
         </div>
         <div style={{
@@ -208,11 +224,19 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
       </div>
 
       {/* Messages */}
-      <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12, minHeight: 320, maxHeight: 440, padding: '4px 2px' }}>
+      <div style={{
+        overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12,
+        minHeight: 300, maxHeight: 420, padding: '4px 2px'
+      }}>
         {messages.map(msg => (
           <div key={msg.id} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
             {msg.role === 'assistant' && (
-              <div style={{ width: 28, height: 28, borderRadius: 8, background: 'rgba(99,102,241,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, marginRight: 8, flexShrink: 0, alignSelf: 'flex-end' }}>⚡</div>
+              <div style={{
+                width: 28, height: 28, borderRadius: 8,
+                background: 'rgba(99,102,241,0.15)', display: 'flex',
+                alignItems: 'center', justifyContent: 'center',
+                fontSize: 14, marginRight: 8, flexShrink: 0, alignSelf: 'flex-end'
+              }}>⚡</div>
             )}
             <div style={{
               maxWidth: '85%', padding: '12px 16px', borderRadius: 14, fontSize: 13, lineHeight: 1.6,
@@ -224,7 +248,6 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
             }}>
               {msg.content}
 
-              {/* Action Card */}
               {msg.action && (
                 <div style={{
                   marginTop: 12, padding: 14, borderRadius: 12,
@@ -233,12 +256,11 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
                   <div style={{ fontSize: 10, fontFamily: 'monospace', color: '#6366F1', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: 8 }}>
                     {msg.action.type === 'swap' ? '🔄 Swap Action' : msg.action.type === 'send' ? '📤 Send Action' : '🌉 Bridge Action'}
                   </div>
-
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 10 }}>
                     {msg.action.type === 'swap' && (
                       <>
                         <Row label="Amount" value={`${msg.action.amount} ${(msg.action.fromToken || 'USDC').toUpperCase()}`} />
-                        <Row label="To" value={(msg.action.toToken || (msg.action.fromToken === 'EURC' ? 'USDC' : 'EURC')).toUpperCase()} color="#818CF8" />
+                        <Row label="To" value={(msg.action.toToken || 'EURC').toUpperCase()} color="#818CF8" />
                         <Row label="Via" value="SimpleAMM · 0.3% fee" color="#64748B" />
                       </>
                     )}
@@ -250,20 +272,21 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
                     )}
                     {msg.action.type === 'bridge' && (
                       <>
-                        <Row label="Amount" value={`${msg.action.amount} ${(msg.action.token || 'USDC').toUpperCase()}`} />
-                        <Row label="Route" value={`${msg.action.fromChain || '?'} → ${msg.action.toChain || 'ARC'}`} color="#0EA5E9" />
-                        <Row label="Note" value="Open Bridge tab to continue" color="#64748B" />
+                        <Row label="Amount" value={`${msg.action.amount} USDC`} />
+                        <Row label="From" value={msg.action.fromChain || '?'} color="#0EA5E9" />
+                        <Row label="To" value="ARC Testnet" color="#22C55E" />
+                        <Row label="Via" value="Circle CCTP" color="#64748B" />
                       </>
                     )}
                   </div>
 
                   {msg.actionStatus === 'idle' && (
-                    <button onClick={() => handleExecute(msg.id, msg.action!)}
-                      style={{
-                        width: '100%', padding: '10px', borderRadius: 10, border: 'none',
-                        background: '#6366F1', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer'
-                      }}>
-                      {msg.action.type === 'bridge' ? 'Open Bridge Tab' : `Confirm & Execute`}
+                    <button onClick={() => handleExecute(msg.id, msg.action!)} style={{
+                      width: '100%', padding: '10px', borderRadius: 10, border: 'none',
+                      background: '#6366F1', color: '#fff', fontSize: 12,
+                      fontWeight: 700, cursor: 'pointer'
+                    }}>
+                      {msg.action.type === 'bridge' ? '🌉 Open Bridge Tab' : '⚡ Confirm & Execute'}
                     </button>
                   )}
                   {msg.actionStatus === 'running' && (
@@ -273,7 +296,7 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
                     </div>
                   )}
                   {msg.actionStatus === 'done' && (
-                    <div style={{ textAlign: 'center', padding: 8, fontSize: 12, color: '#22C55E', fontFamily: 'monospace' }}>✅ Completed</div>
+                    <div style={{ textAlign: 'center', padding: 8, fontSize: 12, color: '#22C55E', fontFamily: 'monospace' }}>✅ Completed!</div>
                   )}
                   {msg.actionStatus === 'error' && (
                     <div style={{ textAlign: 'center', padding: 8, fontSize: 12, color: '#EF4444', fontFamily: 'monospace' }}>❌ Failed — try again</div>
@@ -299,22 +322,36 @@ export default function AIPanel({ onAction }: { onAction?: (action: any) => void
 
       {/* Suggestions */}
       {messages.length <= 1 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {SUGGESTIONS.map(s => (
             <button key={s} onClick={() => handleSend(s)} style={{
-              padding: '8px 14px', borderRadius: 8, fontSize: 12, cursor: 'pointer',
+              padding: '7px 12px', borderRadius: 8, fontSize: 11, cursor: 'pointer',
               background: '#111628', border: '1px solid rgba(255,255,255,0.06)',
-              color: '#94A3B8', textAlign: 'left'
+              color: '#94A3B8', textAlign: 'left', transition: 'all 0.15s'
             }}>{s}</button>
           ))}
         </div>
       )}
 
+      {/* Arc Context Info */}
+      <div style={{
+        padding: '10px 14px', borderRadius: 10,
+        background: 'rgba(14,165,233,0.04)', border: '1px solid rgba(14,165,233,0.1)',
+        fontSize: 10, color: '#475569', fontFamily: 'monospace',
+        display: 'flex', gap: 12, flexWrap: 'wrap'
+      }}>
+        <span>⚡ Arc v0.7.2</span>
+        <span>🌉 Circle CCTP</span>
+        <span>🔄 SimpleAMM</span>
+        <span>🤖 Groq AI</span>
+        <span style={{ color: '#0EA5E9' }}>Mainnet coming 2026</span>
+      </div>
+
       {/* Input */}
       <div style={{ display: 'flex', gap: 10 }}>
         <input
           type="text"
-          placeholder="Type a command... e.g. Swap 5 USDC to EURC"
+          placeholder="Ask me anything about Arc, or try: Swap 5 USDC to EURC"
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && handleSend()}
