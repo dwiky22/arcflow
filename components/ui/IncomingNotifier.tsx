@@ -5,11 +5,7 @@ import { useAccount, usePublicClient } from 'wagmi'
 import { formatUnits, hexToString } from 'viem'
 import { useToast } from './Toast'
 import { CONTRACTS } from '@/lib/wagmi'
-import { ERC20_ABI, MEMO_CONTRACT } from '@/lib/contracts'
-
-// Standard ERC20 transfer(address,uint256) calldata length:
-// 4 bytes selector + 32 bytes address + 32 bytes amount = 68 bytes = 136 hex chars
-const STANDARD_TRANSFER_HEX_LEN = 2 + 68 * 2 // includes '0x' prefix
+import { ERC20_ABI } from '@/lib/contracts'
 
 export default function IncomingNotifier() {
   const { address, isConnected } = useAccount()
@@ -17,6 +13,7 @@ export default function IncomingNotifier() {
   const toast = useToast()
   const lastBalances = useRef<{ usdc: bigint; eurc: bigint } | null>(null)
   const initialized = useRef(false)
+  const processedTxs = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     if (!isConnected || !address || !publicClient) return
@@ -39,27 +36,35 @@ export default function IncomingNotifier() {
         if (usdc > prev.usdc) {
           const diff = usdc - prev.usdc
           const amount = parseFloat(formatUnits(diff, 6)).toFixed(2)
-          const { memo, hash } = await findMemoAndHash(address as `0x${string}`)
-          showAndSave('USDC', amount, memo, hash)
+          const { memo, hash, from } = await findIncomingTx(address as `0x${string}`, CONTRACTS.USDC)
+          saveAndNotify('USDC', amount, memo, hash, from)
         }
 
         if (eurc > prev.eurc) {
           const diff = eurc - prev.eurc
           const amount = parseFloat(formatUnits(diff, 6)).toFixed(2)
-          const { memo, hash } = await findMemoAndHash(address as `0x${string}`)
-          showAndSave('EURC', amount, memo, hash)
+          const { memo, hash, from } = await findIncomingTx(address as `0x${string}`, CONTRACTS.EURC)
+          saveAndNotify('EURC', amount, memo, hash, from)
         }
 
         lastBalances.current = { usdc, eurc }
       } catch {}
     }
 
-    const findMemoAndHash = async (recipient: `0x${string}`): Promise<{ memo: string | null; hash: string | null }> => {
+    // Find incoming tx and decode memo from input data
+    const findIncomingTx = async (
+      recipient: `0x${string}`,
+      tokenAddress: `0x${string}`
+    ): Promise<{ memo: string | null; hash: string | null; from: string | null }> => {
       try {
         const block = await publicClient.getBlockNumber()
-        const transferLogs = await publicClient.getLogs({
+
+        // Get Transfer logs to recipient
+        const logs = await publicClient.getLogs({
+          address: tokenAddress,
           event: {
-            type: 'event', name: 'Transfer',
+            type: 'event',
+            name: 'Transfer',
             inputs: [
               { type: 'address', name: 'from', indexed: true },
               { type: 'address', name: 'to', indexed: true },
@@ -67,73 +72,82 @@ export default function IncomingNotifier() {
             ],
           },
           args: { to: recipient },
-          fromBlock: block - 30n,
+          fromBlock: block - 20n,
           toBlock: block,
         })
 
-        if (!transferLogs.length) return { memo: null, hash: null }
-        const latestTransfer = transferLogs[transferLogs.length - 1]
-        const txHash = latestTransfer.transactionHash || null
-        if (!txHash) return { memo: null, hash: null }
+        if (!logs.length) return { memo: null, hash: null, from: null }
 
-        // 1. Official path: Arc's predeployed Memo contract emits a `Memo`
-        // event in the same tx when memo() is used to wrap the transfer.
-        try {
-          const memoLogs = await publicClient.getLogs({
-            address: MEMO_CONTRACT,
-            event: {
-              type: 'event', name: 'Memo',
-              inputs: [
-                { type: 'address', name: 'sender', indexed: true },
-                { type: 'uint256', name: 'index', indexed: false },
-                { type: 'string', name: 'message', indexed: false },
-              ],
-            },
-            fromBlock: latestTransfer.blockNumber ? latestTransfer.blockNumber - 2n : block - 5n,
-            toBlock: block,
-          })
+        // Get latest unprocessed tx
+        const latest = logs.filter(l =>
+          l.transactionHash && !processedTxs.current.has(l.transactionHash!)
+        ).pop()
 
-          const matchingMemo = memoLogs.find(log => log.transactionHash === txHash)
-          const message = matchingMemo?.args ? (matchingMemo.args as any).message : null
-          if (message) return { memo: message, hash: txHash }
-        } catch {}
+        if (!latest?.transactionHash) return { memo: null, hash: null, from: null }
 
-        // 2. Legacy fallback: older transactions appended the memo as a raw
-        // hex suffix after the standard transfer calldata instead of going
-        // through the Memo contract. Keep decoding this so old txs still show.
+        const txHash = latest.transactionHash
+        processedTxs.current.add(txHash)
+
+        const from = (latest.args as any)?.from || null
+
+        // Fetch tx to decode input data
         try {
           const tx = await publicClient.getTransaction({ hash: txHash })
-          const data = tx.input || '0x'
-
-          if (data.length > STANDARD_TRANSFER_HEX_LEN) {
-            const memoHex = `0x${data.slice(STANDARD_TRANSFER_HEX_LEN)}` as `0x${string}`
-            const decoded = hexToString(memoHex).replace(/\0+$/, '').trim()
-            if (decoded) return { memo: decoded, hash: txHash }
+          if (!tx?.input || tx.input === '0x' || tx.input.length <= 10) {
+            return { memo: null, hash: txHash, from }
           }
-        } catch {}
 
-        return { memo: null, hash: txHash }
-      } catch { return { memo: null, hash: null } }
+          // Standard ERC20 transfer selector = 0xa9059cbb (10 chars: 0x + 8)
+          // If input is longer, extra bytes might be memo
+          const standardLen = 10 + 64 + 64 // 0x + selector + address + amount
+          if (tx.input.length > standardLen) {
+            try {
+              const extraHex = tx.input.slice(standardLen)
+              if (extraHex.length > 0) {
+                const memoStr = hexToString(`0x${extraHex}` as `0x${string}`)
+                  .replace(/\0/g, '').trim()
+                if (memoStr.length > 0 && memoStr.length < 200) {
+                  return { memo: memoStr, hash: txHash, from }
+                }
+              }
+            } catch {}
+          }
+
+          return { memo: null, hash: txHash, from }
+        } catch {
+          return { memo: null, hash: txHash, from }
+        }
+      } catch {
+        return { memo: null, hash: null, from: null }
+      }
     }
 
-    const showAndSave = (token: string, amount: string, memo: string | null, hash: string | null) => {
+    const saveAndNotify = (
+      token: string,
+      amount: string,
+      memo: string | null,
+      hash: string | null,
+      from: string | null
+    ) => {
+      // Save to incoming history
+      try {
+        const incoming = JSON.parse(localStorage.getItem('arcflow_incoming') || '[]')
+        const newItem = { token, amount, memo, hash, from, timestamp: Date.now() }
+        // Avoid duplicate
+        const isDuplicate = hash && incoming.some((i: any) => i.hash === hash)
+        if (!isDuplicate) {
+          localStorage.setItem('arcflow_incoming', JSON.stringify(
+            [newItem, ...incoming].slice(0, 20)
+          ))
+        }
+      } catch {}
+
+      // Show toast
       toast.show({
         type: 'success',
         title: `💰 +${amount} ${token} received!`,
-        desc: memo ? `📌 "${memo}"` : `New ${token} on ARC Testnet`,
+        desc: memo ? `📌 "${memo}"` : `From ${from ? `${from.slice(0, 6)}...${from.slice(-4)}` : 'unknown'}`,
       })
-
-      try {
-        const history = JSON.parse(localStorage.getItem('arcflow_incoming') || '[]')
-
-        // Skip if this hash already exists (e.g. saved by BatchSendPanel with memo)
-        if (hash && history.some((item: any) => item.hash === hash)) return
-
-        localStorage.setItem('arcflow_incoming', JSON.stringify([
-          { token, amount, memo, hash, timestamp: Date.now() },
-          ...history
-        ].slice(0, 20)))
-      } catch {}
     }
 
     check()

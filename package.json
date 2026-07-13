@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@circle-fin/adapter-ethers-v6": "^1.8.2",
-    "@circle-fin/adapter-viem-v2": "^1.11.2",
+    "@circle-fin/adapter-viem-v2": "^1.12.1",
+    "@circle-fin/app-kit": "^1.8.1",
     "@circle-fin/bridge-kit": "^1.10.2",
     "@heroicons/react": "^2.2.0",
     "@rainbow-me/rainbowkit": "^2.2.11",

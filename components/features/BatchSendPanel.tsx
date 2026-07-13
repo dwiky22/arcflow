@@ -25,17 +25,22 @@ export default function BatchSendPanel({ onSuccess }: { onSuccess?: (tx: any) =>
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
-  const [txHash, setTxHash] = useState('')
+  const [txHashes, setTxHashes] = useState<string[]>([])
   const [progress, setProgress] = useState(0)
+  const [done, setDone] = useState(false)
 
-  const validRecipients = recipients.filter(r => r.address && isAddress(r.address) && r.amount && parseFloat(r.amount) > 0)
+  const validRecipients = recipients.filter(r =>
+    r.address && isAddress(r.address) && r.amount && parseFloat(r.amount) > 0
+  )
   const totalAmount = validRecipients.reduce((sum, r) => sum + parseFloat(r.amount || '0'), 0)
 
   useEffect(() => {
     if (!publicClient || !address) return
     publicClient.readContract({
-      address: token.address as `0x${string}`, abi: ERC20_ABI,
-      functionName: 'balanceOf', args: [address],
+      address: token.address as `0x${string}`,
+      abi: ERC20_ABI,
+      functionName: 'balanceOf',
+      args: [address],
     }).then(b => setBalance(parseFloat(formatUnits(b as bigint, token.decimals)).toFixed(4)))
       .catch(() => setBalance('0.00'))
   }, [token, address, publicClient])
@@ -50,59 +55,89 @@ export default function BatchSendPanel({ onSuccess }: { onSuccess?: (tx: any) =>
     if (validRecipients.length === 0) { setError('Add at least one valid recipient'); return }
     if (totalAmount > parseFloat(balance)) { setError(`Insufficient balance. Need ${totalAmount.toFixed(4)} ${token.symbol}`); return }
 
-    setError(''); setLoading(true); setTxHash(''); setStatus(''); setProgress(0)
+    setError(''); setLoading(true); setTxHashes([]); setStatus(''); setProgress(0); setDone(false)
+
     const hashes: string[] = []
 
     try {
       for (let i = 0; i < validRecipients.length; i++) {
         const r = validRecipients[i]
-        setStatus(`Sending to wallet ${i + 1}/${validRecipients.length}...`)
-        setProgress(Math.round((i / validRecipients.length) * 100))
+        setStatus(`Sending to wallet ${i + 1}/${validRecipients.length}... sign in wallet`)
+        setProgress(Math.round((i / validRecipients.length) * 90))
 
         const hash = await walletClient.writeContract({
           address: token.address as `0x${string}`,
-          abi: ERC20_ABI, functionName: 'transfer',
+          abi: ERC20_ABI,
+          functionName: 'transfer',
           args: [r.address as `0x${string}`, parseUnits(r.amount, token.decimals)],
         })
         hashes.push(hash)
-        setStatus(`✅ Wallet ${i + 1} done! ${i < validRecipients.length - 1 ? 'Waiting...' : ''}`)
-        if (i < validRecipients.length - 1) await new Promise(r => setTimeout(r, 3000))
+        setTxHashes([...hashes])
+        setStatus(`✅ Wallet ${i + 1} sent! ${i < validRecipients.length - 1 ? 'Waiting before next...' : ''}`)
+
+        // Save incoming per recipient dengan memo
+        try {
+          const incoming = JSON.parse(localStorage.getItem('arcflow_incoming') || '[]')
+          localStorage.setItem('arcflow_incoming', JSON.stringify([
+            { token: token.symbol, amount: r.amount, memo: r.memo || null, hash, timestamp: Date.now() },
+            ...incoming
+          ].slice(0, 20)))
+        } catch {}
+
+        if (i < validRecipients.length - 1) {
+          await new Promise(res => setTimeout(res, 3000))
+        }
       }
 
       setProgress(100)
       setStatus('All sent! Confirming...')
-      await new Promise(r => setTimeout(r, 5000))
+      await new Promise(r => setTimeout(r, 4000))
 
       const lastHash = hashes[hashes.length - 1]
 
+      // Save to tx history
       try {
         const history = JSON.parse(localStorage.getItem('arcflow_tx_history') || '[]')
         localStorage.setItem('arcflow_tx_history', JSON.stringify([
-          { hash: lastHash, type: 'send', amount: totalAmount.toFixed(4), token: token.symbol, recipient: `${validRecipients.length} wallets`, memo: 'Batch', timestamp: Date.now() },
+          {
+            hash: lastHash, type: 'send',
+            amount: totalAmount.toFixed(4), token: token.symbol,
+            recipient: `${validRecipients.length} wallets`,
+            memo: validRecipients.map(r => r.memo).filter(Boolean).join(', ') || null,
+            timestamp: Date.now()
+          },
           ...history
         ].slice(0, 50)))
       } catch {}
 
-      setTxHash(lastHash)
+      setDone(true)
       setStatus('')
       setProgress(0)
+
       onSuccess?.({ type: 'send', amount: totalAmount.toFixed(4), token: token.symbol, hash: lastHash })
       toast.show({
-        type: 'success', title: 'Batch send complete!',
+        type: 'success',
+        title: 'Batch send complete!',
         desc: `${totalAmount.toFixed(4)} ${token.symbol} → ${validRecipients.length} wallets`,
         link: `https://testnet.arcscan.app/tx/${lastHash}`,
       })
+
+      // Reset
       setRecipients([
         { id: '1', address: '', amount: '', memo: '' },
         { id: '2', address: '', amount: '', memo: '' },
       ])
+
     } catch (e: any) {
       const errMsg = e.shortMessage || e.message?.slice(0, 100) || 'Failed'
       setError(`Failed at wallet ${hashes.length + 1}: ${errMsg}`)
       setStatus('')
       setProgress(0)
-      if (hashes.length > 0) toast.show({ type: 'info', title: `${hashes.length}/${validRecipients.length} sent`, desc: 'Partial success before error' })
-      else toast.show({ type: 'error', title: 'Batch failed', desc: errMsg.slice(0, 60) })
+      if (hashes.length > 0) {
+        toast.show({ type: 'info', title: `Partial: ${hashes.length}/${validRecipients.length} sent`, desc: 'Some failed' })
+      } else {
+        toast.show({ type: 'error', title: 'Batch failed', desc: errMsg.slice(0, 60) })
+      }
     } finally { setLoading(false) }
   }
 
@@ -118,7 +153,7 @@ export default function BatchSendPanel({ onSuccess }: { onSuccess?: (tx: any) =>
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, color: '#818CF8' }}>⚡ Batch Send</div>
           <div style={{ fontSize: 10, color: '#64748B', fontFamily: 'monospace', marginTop: 2 }}>
-            Send to multiple wallets · Sequential transactions
+            Send to multiple wallets · Sequential · Memo per recipient
           </div>
         </div>
         <div style={{ textAlign: 'right' }}>
@@ -127,7 +162,7 @@ export default function BatchSendPanel({ onSuccess }: { onSuccess?: (tx: any) =>
         </div>
       </div>
 
-      {/* Token selector */}
+      {/* Token Selector */}
       <div>
         <div style={{ fontSize: 11, color: '#64748B', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>Token to Send</div>
         <button onClick={() => setShowTokenModal(true)} style={{
@@ -147,82 +182,135 @@ export default function BatchSendPanel({ onSuccess }: { onSuccess?: (tx: any) =>
 
       {/* Recipients */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <div style={{ fontSize: 11, color: '#64748B', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Recipients</div>
+        <div style={{ fontSize: 11, color: '#64748B', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+          Recipients ({validRecipients.length} valid)
+        </div>
+
         {recipients.map((r, i) => (
-          <div key={r.id} style={{ padding: 14, borderRadius: 14, background: '#0d1117', border: '1px solid rgba(255,255,255,0.06)' }}>
+          <div key={r.id} style={{
+            padding: 14, borderRadius: 14,
+            background: '#0d1117', border: `1px solid ${r.address && isAddress(r.address) && r.amount ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,0.06)'}`,
+          }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <div style={{ width: 22, height: 22, borderRadius: '50%', background: 'rgba(99,102,241,0.15)', color: '#818CF8', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700 }}>{i + 1}</div>
-                <span style={{ fontSize: 12, color: '#818CF8', fontFamily: 'monospace', fontWeight: 600 }}>Recipient #{i + 1}</span>
-                {r.address && isAddress(r.address) && r.amount && (
-                  <span style={{ fontSize: 10, color: '#22C55E', fontFamily: 'monospace' }}>✓</span>
-                )}
+                <span style={{ fontSize: 12, color: '#818CF8', fontFamily: 'monospace', fontWeight: 600 }}>
+                  Recipient #{i + 1}
+                  {r.address && isAddress(r.address) && r.amount && <span style={{ color: '#22C55E', marginLeft: 6 }}>✓</span>}
+                </span>
               </div>
               {recipients.length > 1 && (
-                <button onClick={() => removeRecipient(r.id)} style={{ background: 'none', border: 'none', color: '#EF4444', cursor: 'pointer', fontSize: 18 }}>×</button>
+                <button onClick={() => removeRecipient(r.id)}
+                  style={{ background: 'none', border: 'none', color: '#EF4444', cursor: 'pointer', fontSize: 18, padding: 0 }}>×</button>
               )}
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {/* Address */}
               <input placeholder="0x... wallet address" value={r.address}
                 onChange={e => updateRecipient(r.id, 'address', e.target.value)}
                 style={{
                   width: '100%', padding: '10px 12px', borderRadius: 10, fontSize: 13,
-                  background: '#111628', border: `1px solid ${r.address ? (isAddress(r.address) ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)') : 'rgba(255,255,255,0.07)'}`,
-                  color: '#F1F5F9', outline: 'none', boxSizing: 'border-box' as const, fontFamily: 'monospace'
+                  background: '#111628',
+                  border: `1px solid ${r.address ? (isAddress(r.address) ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)') : 'rgba(255,255,255,0.07)'}`,
+                  color: '#F1F5F9', outline: 'none', boxSizing: 'border-box' as const,
+                  fontFamily: 'monospace'
                 }} />
 
               <div style={{ display: 'flex', gap: 8 }}>
+                {/* Amount */}
                 <div style={{ position: 'relative', flex: 1 }}>
                   <input type="number" placeholder="Amount" value={r.amount}
                     onChange={e => updateRecipient(r.id, 'amount', e.target.value)}
-                    style={{ width: '100%', padding: '10px 60px 10px 12px', borderRadius: 10, fontSize: 13, background: '#111628', border: '1px solid rgba(255,255,255,0.07)', color: '#F1F5F9', outline: 'none', boxSizing: 'border-box' as const }} />
-                  <span style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', fontSize: 11, fontWeight: 700, color: token.color, fontFamily: 'monospace' }}>{token.symbol}</span>
+                    style={{
+                      width: '100%', padding: '10px 60px 10px 12px', borderRadius: 10, fontSize: 13,
+                      background: '#111628', border: '1px solid rgba(255,255,255,0.07)',
+                      color: '#F1F5F9', outline: 'none', boxSizing: 'border-box' as const
+                    }} />
+                  <span style={{
+                    position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)',
+                    fontSize: 11, fontWeight: 700, color: token.color, fontFamily: 'monospace'
+                  }}>{token.symbol}</span>
                 </div>
-                <input placeholder="Note (optional)" value={r.memo}
+                {/* Memo */}
+                <input placeholder="Memo (optional)" value={r.memo}
                   onChange={e => updateRecipient(r.id, 'memo', e.target.value)}
-                  style={{ flex: 1, padding: '10px 12px', borderRadius: 10, fontSize: 12, background: '#111628', border: '1px solid rgba(255,255,255,0.07)', color: '#F1F5F9', outline: 'none', boxSizing: 'border-box' as const }} />
+                  style={{
+                    flex: 1, padding: '10px 12px', borderRadius: 10, fontSize: 12,
+                    background: '#111628', border: '1px solid rgba(255,255,255,0.07)',
+                    color: '#F1F5F9', outline: 'none', boxSizing: 'border-box' as const
+                  }} />
               </div>
             </div>
           </div>
         ))}
       </div>
 
+      {/* Add Recipient */}
       <button onClick={addRecipient} disabled={loading} style={{
-        padding: '10px', borderRadius: 10, border: '1px dashed rgba(99,102,241,0.3)',
-        background: 'transparent', color: '#818CF8', fontSize: 12, cursor: 'pointer', fontFamily: 'monospace'
+        padding: '10px', borderRadius: 10,
+        border: '1px dashed rgba(99,102,241,0.3)',
+        background: 'transparent', color: '#818CF8',
+        fontSize: 12, cursor: 'pointer', fontFamily: 'monospace'
       }}>+ Add Recipient</button>
 
       {/* Summary */}
       {validRecipients.length > 0 && (
-        <div style={{ padding: '12px 14px', borderRadius: 12, background: 'rgba(99,102,241,0.04)', border: '1px solid rgba(99,102,241,0.15)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{
+          padding: '12px 14px', borderRadius: 12,
+          background: 'rgba(99,102,241,0.04)', border: '1px solid rgba(99,102,241,0.15)',
+          display: 'flex', flexDirection: 'column', gap: 6
+        }}>
           <div style={{ fontSize: 10, color: '#64748B', fontFamily: 'monospace', letterSpacing: '1px', marginBottom: 4 }}>BATCH SUMMARY</div>
           <Row label="Valid recipients" value={`${validRecipients.length} wallets`} color="#818CF8" />
           <Row label="Total amount" value={`${totalAmount.toFixed(4)} ${token.symbol}`} color={token.color} />
+          <Row label="With memo" value={`${validRecipients.filter(r => r.memo).length} recipients`} color="#0EA5E9" />
           <Row label="Transactions" value={`${validRecipients.length} sequential`} color="#22C55E" />
-          {totalAmount > parseFloat(balance) && <Row label="⚠ Warning" value="Insufficient balance!" color="#EF4444" />}
+          {totalAmount > parseFloat(balance) && (
+            <Row label="⚠ Warning" value="Insufficient balance!" color="#EF4444" />
+          )}
         </div>
       )}
 
       {/* Progress bar */}
       {loading && progress > 0 && (
         <div style={{ borderRadius: 8, overflow: 'hidden', background: 'rgba(255,255,255,0.05)', height: 4 }}>
-          <div style={{ height: '100%', borderRadius: 8, background: 'linear-gradient(90deg, #6366F1, #818CF8)', width: `${progress}%`, transition: 'width 0.5s ease' }} />
+          <div style={{
+            height: '100%', borderRadius: 8,
+            background: 'linear-gradient(90deg, #6366F1, #818CF8)',
+            width: `${progress}%`, transition: 'width 0.5s ease'
+          }} />
         </div>
       )}
 
       {status && (
-        <div style={{ padding: '10px 14px', borderRadius: 10, background: 'rgba(99,102,241,0.05)', border: '1px solid rgba(99,102,241,0.15)', color: '#818CF8', fontSize: 11, fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{
+          padding: '10px 14px', borderRadius: 10,
+          background: 'rgba(99,102,241,0.05)', border: '1px solid rgba(99,102,241,0.15)',
+          color: '#818CF8', fontSize: 11, fontFamily: 'monospace',
+          display: 'flex', alignItems: 'center', gap: 8
+        }}>
           {loading && <span style={{ width: 10, height: 10, borderRadius: '50%', border: '2px solid rgba(99,102,241,0.3)', borderTopColor: '#818CF8', display: 'inline-block', animation: 'spin 1s linear infinite', flexShrink: 0 }} />}
           {status}
         </div>
       )}
 
-      {error && <div style={{ padding: '10px 14px', borderRadius: 10, background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.2)', color: '#EF4444', fontSize: 12 }}>❌ {error}</div>}
+      {error && (
+        <div style={{ padding: '10px 14px', borderRadius: 10, background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.2)', color: '#EF4444', fontSize: 12 }}>
+          ❌ {error}
+        </div>
+      )}
 
-      {txHash && (
-        <div style={{ padding: '10px 14px', borderRadius: 10, background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.2)', color: '#22C55E', fontSize: 12, fontFamily: 'monospace' }}>
-          ✅ Batch complete! <a href={`https://testnet.arcscan.app/tx/${txHash}`} target="_blank" rel="noreferrer" style={{ color: '#22C55E', textDecoration: 'underline' }}>View last tx ↗</a>
+      {/* Results */}
+      {done && txHashes.length > 0 && (
+        <div style={{ padding: '12px 14px', borderRadius: 12, background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.2)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 11, color: '#22C55E', fontWeight: 600, marginBottom: 4 }}>✅ Batch complete! {txHashes.length} transactions sent</div>
+          {txHashes.slice(-3).map((h, i) => (
+            <a key={h} href={`https://testnet.arcscan.app/tx/${h}`} target="_blank" rel="noreferrer"
+              style={{ fontSize: 10, color: '#22C55E', textDecoration: 'underline', fontFamily: 'monospace' }}>
+              Tx {txHashes.length > 3 ? txHashes.length - 2 + i : i + 1}: {h.slice(0, 14)}... ↗
+            </a>
+          ))}
         </div>
       )}
 
@@ -232,19 +320,23 @@ export default function BatchSendPanel({ onSuccess }: { onSuccess?: (tx: any) =>
           width: '100%', padding: '16px', borderRadius: 12, fontSize: 15, fontWeight: 700,
           cursor: loading || validRecipients.length === 0 ? 'not-allowed' : 'pointer',
           border: 'none',
-          background: loading || validRecipients.length === 0 ? 'rgba(255,255,255,0.04)' : 'linear-gradient(135deg, #6366F1, #818CF8)',
+          background: loading || validRecipients.length === 0
+            ? 'rgba(255,255,255,0.04)'
+            : 'linear-gradient(135deg, #6366F1, #818CF8)',
           color: loading || validRecipients.length === 0 ? '#475569' : '#fff',
           boxShadow: !loading && validRecipients.length > 0 ? '0 0 24px rgba(99,102,241,0.2)' : 'none',
           transition: 'all 0.2s'
         }}>
-        {loading ? `⟳ ${status || 'Processing...'}` : `📤 Send to ${validRecipients.length} Wallet${validRecipients.length !== 1 ? 's' : ''}`}
+        {loading
+          ? `⟳ ${status || 'Processing...'}`
+          : `📤 Send to ${validRecipients.length} Wallet${validRecipients.length !== 1 ? 's' : ''}`}
       </button>
 
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
       {showTokenModal && (
         <TokenSelectorModal
-          onSelect={t => { setToken(t); }}
+          onSelect={t => { setToken(t) }}
           onClose={() => setShowTokenModal(false)}
         />
       )}

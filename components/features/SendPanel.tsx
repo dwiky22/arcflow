@@ -49,8 +49,10 @@ export default function SendPanel({ onSuccess }: { onSuccess?: (tx: any) => void
   useEffect(() => {
     if (!publicClient || !address) return
     publicClient.readContract({
-      address: token.address as `0x${string}`, abi: ERC20_ABI,
-      functionName: 'balanceOf', args: [address],
+      address: token.address as `0x${string}`,
+      abi: ERC20_ABI,
+      functionName: 'balanceOf',
+      args: [address],
     }).then(b => setBalance(parseFloat(formatUnits(b as bigint, token.decimals)).toFixed(4)))
       .catch(() => setBalance('0.00'))
   }, [token, address, publicClient])
@@ -81,15 +83,18 @@ export default function SendPanel({ onSuccess }: { onSuccess?: (tx: any) => void
       const amountIn = parseUnits(amount, token.decimals)
       setStatus('Sign transaction in wallet...')
 
+      // Simple ERC20 transfer — proven working
       const hash = await walletClient.writeContract({
         address: token.address as `0x${string}`,
-        abi: ERC20_ABI, functionName: 'transfer',
+        abi: ERC20_ABI,
+        functionName: 'transfer',
         args: [recipient as `0x${string}`, amountIn],
       })
 
-      setStatus(`Sent! Confirming...`)
+      setStatus(`Sent! Confirming... (${hash.slice(0, 10)}...)`)
       await new Promise(r => setTimeout(r, 6000))
 
+      // Save to tx history with memo
       try {
         const history = JSON.parse(localStorage.getItem('arcflow_tx_history') || '[]')
         localStorage.setItem('arcflow_tx_history', JSON.stringify([
@@ -98,6 +103,7 @@ export default function SendPanel({ onSuccess }: { onSuccess?: (tx: any) => void
         ].slice(0, 50)))
       } catch {}
 
+      // Save to incoming — penerima lihat di Received tab dengan memo
       try {
         const incoming = JSON.parse(localStorage.getItem('arcflow_incoming') || '[]')
         localStorage.setItem('arcflow_incoming', JSON.stringify([
@@ -113,7 +119,8 @@ export default function SendPanel({ onSuccess }: { onSuccess?: (tx: any) => void
 
       onSuccess?.({ type: 'send', amount, token: token.symbol, recipient, memo, hash })
       toast.show({
-        type: 'success', title: 'Transfer successful!',
+        type: 'success',
+        title: 'Transfer successful!',
         desc: `${amount} ${token.symbol} → ${recipient.slice(0, 6)}...${recipient.slice(-4)}${memo ? ` · "${memo}"` : ''}`,
         link: `https://testnet.arcscan.app/tx/${hash}`,
       })
@@ -127,10 +134,10 @@ export default function SendPanel({ onSuccess }: { onSuccess?: (tx: any) => void
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
 
-      {/* Token selector */}
+      {/* Token + Amount */}
       <div style={{ background: '#0d1117', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 16, padding: '14px 16px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-          <span style={{ fontSize: 11, color: '#64748B', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Token</span>
+          <span style={{ fontSize: 11, color: '#64748B', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Token & Amount</span>
           <span style={{ fontSize: 11, color: '#64748B', fontFamily: 'monospace' }}>
             Balance: <span style={{ color: token.color }}>{balance}</span>
           </span>
@@ -138,12 +145,15 @@ export default function SendPanel({ onSuccess }: { onSuccess?: (tx: any) => void
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <input type="number" placeholder="0.0" value={amount}
             onChange={e => setAmount(e.target.value)}
-            style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', fontSize: 28, fontWeight: 700, color: amount ? '#F1F5F9' : '#475569', padding: 0, minWidth: 0 }} />
+            style={{
+              flex: 1, background: 'transparent', border: 'none', outline: 'none',
+              fontSize: 28, fontWeight: 700, color: amount ? '#F1F5F9' : '#475569',
+              padding: 0, minWidth: 0
+            }} />
           <button onClick={() => setShowTokenModal(true)} style={{
             display: 'flex', alignItems: 'center', gap: 8,
             background: token.bg, border: `1px solid ${token.color}35`,
             borderRadius: 12, padding: '8px 14px', cursor: 'pointer', flexShrink: 0,
-            transition: 'all 0.15s'
           }}>
             <TokenLogo symbol={token.symbol} size={24} />
             <span style={{ fontSize: 14, fontWeight: 700, color: '#F1F5F9' }}>{token.symbol}</span>
@@ -236,7 +246,7 @@ export default function SendPanel({ onSuccess }: { onSuccess?: (tx: any) => void
           onChange={e => setMemo(e.target.value)} maxLength={100}
           style={inputStyle} />
         <p style={{ fontSize: 10, color: '#475569', fontFamily: 'monospace', marginTop: 4 }}>
-          📌 Saved with transaction · {memo.length}/100
+          📌 Memo tersimpan di ArcFlow · Muncul di Activity → Received · {memo.length}/100
         </p>
       </div>
 
@@ -254,7 +264,7 @@ export default function SendPanel({ onSuccess }: { onSuccess?: (tx: any) => void
 
       {status && (
         <div style={{ padding: '10px 14px', borderRadius: 10, background: 'rgba(14,165,233,0.05)', border: '1px solid rgba(14,165,233,0.15)', color: '#0EA5E9', fontSize: 11, fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ width: 10, height: 10, borderRadius: '50%', border: '2px solid rgba(14,165,233,0.3)', borderTopColor: '#0EA5E9', display: 'inline-block', animation: 'spin 1s linear infinite', flexShrink: 0 }} />
+          <span style={{ width: 10, height: 10, borderRadius: '50%', flexShrink: 0, border: '2px solid rgba(14,165,233,0.3)', borderTopColor: '#0EA5E9', display: 'inline-block', animation: 'spin 1s linear infinite' }} />
           {status}
         </div>
       )}
@@ -265,8 +275,10 @@ export default function SendPanel({ onSuccess }: { onSuccess?: (tx: any) => void
 
       {txHash && (
         <div style={{ padding: '10px 14px', borderRadius: 10, background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.2)', color: '#22C55E', fontSize: 12, fontFamily: 'monospace' }}>
-          ✅ Sent! {memo && <span style={{ color: '#0EA5E9' }}>📌 "{memo}" · </span>}
-          <a href={`https://testnet.arcscan.app/tx/${txHash}`} target="_blank" rel="noreferrer" style={{ color: '#22C55E', textDecoration: 'underline' }}>View ↗</a>
+          ✅ Sent!{' '}
+          {memo && <span style={{ color: '#0EA5E9' }}>📌 "{memo}" · </span>}
+          <a href={`https://testnet.arcscan.app/tx/${txHash}`} target="_blank" rel="noreferrer"
+            style={{ color: '#22C55E', textDecoration: 'underline' }}>View on ArcScan ↗</a>
         </div>
       )}
 
@@ -275,12 +287,14 @@ export default function SendPanel({ onSuccess }: { onSuccess?: (tx: any) => void
           width: '100%', padding: '16px', borderRadius: 12, fontSize: 15, fontWeight: 700,
           cursor: loading || !isValidAddress || !isValidAmount ? 'not-allowed' : 'pointer',
           border: 'none',
-          background: loading || !isValidAddress || !isValidAmount ? 'rgba(255,255,255,0.04)' : 'linear-gradient(135deg, #22C55E, #16A34A)',
+          background: loading || !isValidAddress || !isValidAmount
+            ? 'rgba(255,255,255,0.04)'
+            : 'linear-gradient(135deg, #22C55E, #16A34A)',
           color: loading || !isValidAddress || !isValidAmount ? '#475569' : '#fff',
           boxShadow: !loading && isValidAddress && isValidAmount ? '0 0 24px rgba(34,197,94,0.2)' : 'none',
           transition: 'all 0.2s'
         }}>
-        {loading ? `⟳ ${status || 'Processing...'}` : `Send ${amount || '0'} ${token.symbol}${memo ? ' + 📌' : ''}`}
+        {loading ? `⟳ ${status || 'Processing...'}` : `Send ${amount || '0'} ${token.symbol}${memo ? ' + 📌 memo' : ''}`}
       </button>
 
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
